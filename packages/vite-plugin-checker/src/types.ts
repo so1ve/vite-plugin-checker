@@ -81,6 +81,37 @@ export type StylelintConfig =
       }>
     }
 
+type BiomeCommand = 'lint' | 'check' | 'format' | 'ci'
+/** Biome checker configuration */
+export type BiomeConfig =
+  | boolean
+  | {
+      /**
+       * Command will be used in dev and build mode, will be override
+       * if `dev.command` or `build.command` is set their mode.
+       */
+      command?: BiomeCommand
+      /**
+       * Flags of the command, will be override if `dev.flags`
+       * or `build.command` is set their mode.
+       * */
+      flags?: string
+      dev?: Partial<{
+        /** Command will be used in dev mode */
+        command: BiomeCommand
+        /** Flags of the command */
+        flags?: string
+        /** Which level of the diagnostic will be emitted from plugin */
+        logLevel: ('error' | 'warning' | 'info')[]
+      }>
+      build?: Partial<{
+        /** Command will be used in build mode */
+        command: BiomeCommand
+        /** Flags of the command */
+        flags?: string
+      }>
+    }
+
 export enum DiagnosticLevel {
   Warning = 0,
   Error = 1,
@@ -177,6 +208,7 @@ export interface BuildInCheckers {
   vls: VlsConfig
   eslint: EslintConfig
   stylelint: StylelintConfig
+  biome: BiomeConfig
 }
 
 export type BuildInCheckerNames = keyof BuildInCheckers
@@ -250,7 +282,9 @@ export type Action =
 
 export type BuildCheckBin = BuildCheckBinStr | BuildCheckBinFn
 export type BuildCheckBinStr = [string, ReadonlyArray<string>]
-export type BuildCheckBinFn = (config: UserPluginConfig) => [string, ReadonlyArray<string>]
+export type BuildCheckBinFn = (
+  config: UserPluginConfig,
+) => [string, ReadonlyArray<string>]
 
 export interface ConfigureServeChecker {
   worker: Worker
@@ -277,7 +311,7 @@ export interface CheckerDiagnostic {
 }
 
 export type CreateDiagnostic<T extends BuildInCheckerNames = any> = (
-  config: Pick<BuildInCheckers, T> & SharedConfig
+  config: Pick<BuildInCheckers, T> & SharedConfig,
 ) => CheckerDiagnostic
 
 /* ----------------------------- generic utility types ----------------------------- */

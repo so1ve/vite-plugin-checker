@@ -11,9 +11,14 @@ import * as _vscodeUri from 'vscode-uri'
 const URI = _vscodeUri?.default?.URI ?? _vscodeUri.URI
 import { parentPort } from 'node:worker_threads'
 
-import { type SourceLocation, codeFrameColumns } from '@babel/code-frame'
+import type { SourceLocation } from '@babel/code-frame'
 
 import { WS_CHECKER_ERROR_EVENT } from './client/index.js'
+import {
+  createFrame,
+  lineColLocToBabelLoc,
+  tsLikeLocToBabelLoc,
+} from './codeFrame.js'
 import {
   ACTION_TYPES,
   type ClientDiagnosticPayload,
@@ -25,14 +30,12 @@ import { isMainThread } from './utils.js'
 const _require = createRequire(import.meta.url)
 import type { ESLint } from 'eslint'
 import type Stylelint from 'stylelint'
-import type { Range } from 'vscode-languageclient'
 import type {
   Diagnostic as LspDiagnostic,
   PublishDiagnosticsParams,
 } from 'vscode-languageclient/node'
 
 import type {
-  LineAndCharacter,
   Diagnostic as TsDiagnostic,
   flattenDiagnosticMessageText as flattenDiagnosticMessageTextType,
 } from 'typescript'
@@ -67,15 +70,15 @@ const defaultLogLevel = [
 
 export function filterLogLevel(
   diagnostics: NormalizedDiagnostic,
-  level?: DiagnosticLevel[]
+  level?: DiagnosticLevel[],
 ): NormalizedDiagnostic | null
 export function filterLogLevel(
   diagnostics: NormalizedDiagnostic[],
-  level?: DiagnosticLevel[]
+  level?: DiagnosticLevel[],
 ): NormalizedDiagnostic[]
 export function filterLogLevel(
   diagnostics: NormalizedDiagnostic | NormalizedDiagnostic[],
-  level: DiagnosticLevel[] = defaultLogLevel
+  level: DiagnosticLevel[] = defaultLogLevel,
 ): NormalizedDiagnostic | null | NormalizedDiagnostic[] {
   if (Array.isArray(diagnostics)) {
     return diagnostics.filter((d) => {
@@ -89,16 +92,22 @@ export function filterLogLevel(
 
 export function diagnosticToTerminalLog(
   d: NormalizedDiagnostic,
-  name?: 'TypeScript' | 'vue-tsc' | 'VLS' | 'ESLint' | 'Stylelint'
+  name?: 'TypeScript' | 'vue-tsc' | 'VLS' | 'ESLint' | 'Stylelint' | 'Biome',
 ): string {
   const nameInLabel = name ? `(${name})` : ''
   const boldBlack = chalk.bold.rgb(0, 0, 0)
 
   const labelMap: Record<DiagnosticLevel, string> = {
     [DiagnosticLevel.Error]: boldBlack.bgRedBright(` ERROR${nameInLabel} `),
-    [DiagnosticLevel.Warning]: boldBlack.bgYellowBright(` WARNING${nameInLabel} `),
-    [DiagnosticLevel.Suggestion]: boldBlack.bgBlueBright(` SUGGESTION${nameInLabel} `),
-    [DiagnosticLevel.Message]: boldBlack.bgCyanBright(` MESSAGE${nameInLabel} `),
+    [DiagnosticLevel.Warning]: boldBlack.bgYellowBright(
+      ` WARNING${nameInLabel} `,
+    ),
+    [DiagnosticLevel.Suggestion]: boldBlack.bgBlueBright(
+      ` SUGGESTION${nameInLabel} `,
+    ),
+    [DiagnosticLevel.Message]: boldBlack.bgCyanBright(
+      ` MESSAGE${nameInLabel} `,
+    ),
   }
 
   const levelLabel = labelMap[d.level ?? DiagnosticLevel.Error]
@@ -117,12 +126,18 @@ export function diagnosticToTerminalLog(
     .join(os.EOL)
 }
 
-export function diagnosticToRuntimeError(d: NormalizedDiagnostic): DiagnosticToRuntime
-export function diagnosticToRuntimeError(d: NormalizedDiagnostic[]): DiagnosticToRuntime[]
 export function diagnosticToRuntimeError(
-  diagnostics: NormalizedDiagnostic | NormalizedDiagnostic[]
+  d: NormalizedDiagnostic,
+): DiagnosticToRuntime
+export function diagnosticToRuntimeError(
+  d: NormalizedDiagnostic[],
+): DiagnosticToRuntime[]
+export function diagnosticToRuntimeError(
+  diagnostics: NormalizedDiagnostic | NormalizedDiagnostic[],
 ): DiagnosticToRuntime | DiagnosticToRuntime[] {
-  const diagnosticsArray = Array.isArray(diagnostics) ? diagnostics : [diagnostics]
+  const diagnosticsArray = Array.isArray(diagnostics)
+    ? diagnostics
+    : [diagnostics]
 
   const results: DiagnosticToRuntime[] = diagnosticsArray.map((d) => {
     let loc: DiagnosticToRuntime['loc']
@@ -137,7 +152,11 @@ export function diagnosticToRuntimeError(
     return {
       message: d.message ?? '',
       stack:
-        typeof d.stack === 'string' ? d.stack : Array.isArray(d.stack) ? d.stack.join(os.EOL) : '',
+        typeof d.stack === 'string'
+          ? d.stack
+          : Array.isArray(d.stack)
+            ? d.stack.join(os.EOL)
+            : '',
       id: d.id,
       frame: d.stripedCodeFrame,
       checkerId: d.checker,
@@ -151,7 +170,7 @@ export function diagnosticToRuntimeError(
 
 export function toClientPayload(
   id: string,
-  diagnostics: DiagnosticToRuntime[]
+  diagnostics: DiagnosticToRuntime[],
 ): ClientDiagnosticPayload {
   return {
     event: WS_CHECKER_ERROR_EVENT,
@@ -162,42 +181,17 @@ export function toClientPayload(
   }
 }
 
-export function createFrame({
-  source,
-  location,
-}: {
-  /** file source code */
-  source: string
-  location: SourceLocation
-}) {
-  const frame = codeFrameColumns(source, location, {
-    // worker tty did not fork parent process stdout, let's make a workaround
-    forceColor: true,
-  })
-    .split('\n')
-    .map((line) => `  ${line}`)
-    .join(os.EOL)
-
-  return frame
-}
-
-export function tsLocationToBabelLocation(
-  tsLoc: Record<'start' | 'end', LineAndCharacter /** 0-based */>
-): SourceLocation {
-  return {
-    start: { line: tsLoc.start.line + 1, column: tsLoc.start.character + 1 },
-    end: { line: tsLoc.end.line + 1, column: tsLoc.end.character + 1 },
-  }
-}
-
-export function wrapCheckerSummary(checkerName: string, rawSummary: string): string {
+export function wrapCheckerSummary(
+  checkerName: string,
+  rawSummary: string,
+): string {
   return `[${checkerName}] ${rawSummary}`
 }
 
 export function composeCheckerSummary(
   checkerName: string,
   errorCount: number,
-  warningCount: number
+  warningCount: number,
 ): string {
   const message = `Found ${errorCount} error${
     errorCount > 1 ? 's' : ''
@@ -222,20 +216,25 @@ export function normalizeTsDiagnostic(d: TsDiagnostic): NormalizedDiagnostic {
   const message = flattenDiagnosticMessageText(d.messageText, os.EOL)
 
   let loc: SourceLocation | undefined
-  const pos = d.start === undefined ? null : d.file?.getLineAndCharacterOfPosition?.(d.start)
-  if (pos && d.file && typeof d.start === 'number' && typeof d.length === 'number') {
-    loc = tsLocationToBabelLocation({
-      start: d.file?.getLineAndCharacterOfPosition(d.start),
-      end: d.file?.getLineAndCharacterOfPosition(d.start + d.length),
+  const pos =
+    d.start === undefined
+      ? null
+      : d.file?.getLineAndCharacterOfPosition?.(d.start)
+  if (
+    pos &&
+    d.file &&
+    typeof d.start === 'number' &&
+    typeof d.length === 'number'
+  ) {
+    loc = tsLikeLocToBabelLoc({
+      start: pos,
+      end: d.file.getLineAndCharacterOfPosition(d.start + d.length),
     })
   }
 
   let codeFrame: string | undefined
   if (loc) {
-    codeFrame = createFrame({
-      source: d.file!.text,
-      location: loc,
-    })
+    codeFrame = createFrame(d.file!.text, loc)
   }
 
   return {
@@ -262,8 +261,8 @@ export function normalizeLspDiagnostic({
   fileText: string
 }): NormalizedDiagnostic {
   let level = DiagnosticLevel.Error
-  const loc = lspRange2Location(diagnostic.range)
-  const codeFrame = codeFrameColumns(fileText, loc)
+  const loc = tsLikeLocToBabelLoc(diagnostic.range)
+  const codeFrame = createFrame(fileText, loc)
 
   switch (diagnostic.severity) {
     case 1: // Error
@@ -293,7 +292,7 @@ export function normalizeLspDiagnostic({
 }
 
 export async function normalizePublishDiagnosticParams(
-  publishDiagnostics: PublishDiagnosticsParams
+  publishDiagnostics: PublishDiagnosticsParams,
 ): Promise<NormalizedDiagnostic[]> {
   const diagnostics = publishDiagnostics.diagnostics
   const absFilePath = uriToAbsPath(publishDiagnostics.uri)
@@ -315,22 +314,11 @@ export function uriToAbsPath(documentUri: string): string {
   return URI.parse(documentUri).fsPath
 }
 
-export function lspRange2Location(range: Range): SourceLocation {
-  return {
-    start: {
-      line: range.start.line + 1,
-      column: range.start.character + 1,
-    },
-    end: {
-      line: range.end.line + 1,
-      column: range.end.character + 1,
-    },
-  }
-}
-
 /* --------------------------------- vue-tsc -------------------------------- */
 
-export function normalizeVueTscDiagnostic(d: TsDiagnostic): NormalizedDiagnostic {
+export function normalizeVueTscDiagnostic(
+  d: TsDiagnostic,
+): NormalizedDiagnostic {
   const diagnostic = normalizeTsDiagnostic(d)
   diagnostic.checker = 'vue-tsc'
   return diagnostic
@@ -339,12 +327,14 @@ export function normalizeVueTscDiagnostic(d: TsDiagnostic): NormalizedDiagnostic
 /* --------------------------------- ESLint --------------------------------- */
 
 const isNormalizedDiagnostic = (
-  d: NormalizedDiagnostic | null | undefined
+  d: NormalizedDiagnostic | null | undefined,
 ): d is NormalizedDiagnostic => {
   return Boolean(d)
 }
 
-export function normalizeEslintDiagnostic(diagnostic: ESLint.LintResult): NormalizedDiagnostic[] {
+export function normalizeEslintDiagnostic(
+  diagnostic: ESLint.LintResult,
+): NormalizedDiagnostic[] {
   return diagnostic.messages
     .map((d) => {
       let level = DiagnosticLevel.Error
@@ -360,21 +350,9 @@ export function normalizeEslintDiagnostic(diagnostic: ESLint.LintResult): Normal
           break
       }
 
-      const loc: SourceLocation = {
-        start: {
-          line: d.line,
-          column: d.column,
-        },
-        end: {
-          line: d.endLine || 0,
-          column: d.endColumn,
-        },
-      }
+      const loc = lineColLocToBabelLoc(d)
 
-      const codeFrame = createFrame({
-        source: diagnostic.source ?? '',
-        location: loc,
-      })
+      const codeFrame = createFrame(diagnostic.source ?? '', loc)
 
       return {
         message: `${d.message} (${d.ruleId})`,
@@ -393,7 +371,7 @@ export function normalizeEslintDiagnostic(diagnostic: ESLint.LintResult): Normal
 /* --------------------------------- Stylelint --------------------------------- */
 
 export function normalizeStylelintDiagnostic(
-  diagnostic: Stylelint.LintResult
+  diagnostic: Stylelint.LintResult,
 ): NormalizedDiagnostic[] {
   return diagnostic.warnings
     .map((d) => {
@@ -410,22 +388,13 @@ export function normalizeStylelintDiagnostic(
           return null
       }
 
-      const loc: SourceLocation = {
-        start: {
-          line: d.line,
-          column: d.column,
-        },
-        end: {
-          line: d.endLine || 0,
-          column: d.endColumn,
-        },
-      }
+      const loc = lineColLocToBabelLoc(d)
 
-      const codeFrame = createFrame({
+      const codeFrame = createFrame(
         // @ts-ignore
-        source: diagnostic._postcssResult.css ?? '',
-        location: loc,
-      })
+        diagnostic._postcssResult.css ?? '',
+        loc,
+      )
 
       return {
         message: `${d.text} (${d.rule})`,
